@@ -86,6 +86,7 @@ class FlashAttention2Function(Function):
             O[..., i*B_q: (i+1)*B_q, :] = O_i 
             # write l
             L[..., i*B_q: (i+1)*B_q] = l_i
+        ctx.is_causal = is_causal
         ctx.save_for_backward(L, Q, K, V, O)
         return O
 
@@ -100,6 +101,7 @@ class FlashAttention2Function(Function):
         '''
 
         L, Q, K, V, O = ctx.saved_tensors
-        return _flash_backward_compiled(Q, K, V, O, dO, L)
+        dQ, dK, dV = _flash_backward_compiled(Q, K, V, O, dO, L)
+        return dQ, dK, dV, None,
         
 

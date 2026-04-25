@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 from torch.autograd import Function
 import torch
+from cs336_systems.flash_forward import _flash_backward_compiled
 
 @triton.jit
 def flash_fwd_kernel(
@@ -33,6 +34,7 @@ def flash_fwd_kernel(
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
     is_causal: tl.constexpr,
+    input_dtype: tl.constexpr,
     ):
 
     # Program indices
@@ -94,14 +96,14 @@ def flash_fwd_kernel(
     After loop: normalize, compute L, store O and L
     """
 
-    Q = tl.load(Q_block_ptr)
+    Q = tl.load(Q_block_ptr).to(tl.float32)
     O_i = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
     l_i = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
     m_i = tl.full((Q_TILE_SIZE,), float('-inf'), dtype=tl.float32)
 
     for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
-        K = tl.load(K_block_ptr)
-        V = tl.load(V_block_ptr)
+        K = tl.load(K_block_ptr).to(tl.float32)
+        V = tl.load(V_block_ptr).to(tl.float32)
 
         S = tl.dot(Q, tl.trans(K)) * scale
         if is_causal:
@@ -123,23 +125,24 @@ def flash_fwd_kernel(
     
     O_i = O_i / l_i[:, None]
     L_i = m_i + tl.log(l_i)
-    tl.store(O_block_ptr, O_i)
-    tl.store(L_block_ptr, L_i)
+    tl.store(O_block_ptr, O_i.to(input_dtype))
+    tl.store(L_block_ptr, L_i.to(input_dtype))
 
 class TritonFlashAttentionAutograd(Function):
 
     @staticmethod
-    def forward(ctx, Q, K, V, is_causal=False):
-        B_q = 16
-        B_k = 16
+    def forward(ctx, Q, K, V, is_causal=False, B_q=16, B_k=16):
         N_q = Q.shape[-2]
         N_k = K.shape[-2]
-        T_q = Q.shape[-2] // B_q
-        T_k = K.shape[-2] // B_k
+        T_q = N_q // B_q
+        T_k = N_k // B_k
         d = Q.shape[-1]
         O = torch.zeros_like(Q)
         L = torch.zeros(*Q.shape[:-1], device=Q.device, dtype=Q.dtype)
-        grid = (T_q, Q.shape[0])
+        grid = (T_q, Q.shape[0], B_q, B_k)
+        dtype_map = {torch.float32: tl.float32, torch.bfloat16: tl.bfloat16}
+        input_dtype = dtype_map[Q.dtype]
+
     # Q_ptr, K_ptr, V_ptr,
     # O_ptr, L_ptr,
     # stride_qb, stride_qq, stride_qd,
@@ -162,10 +165,17 @@ class TritonFlashAttentionAutograd(Function):
                             1 / (d ** 0.5),
                             d,
                             B_q, B_k,
-                            is_causal)
+                            is_causal,
+                            input_dtype)
 
         ctx.is_causal = is_causal
         ctx.save_for_backward(L, Q, K, V, O)
         return O
+    
+    @staticmethod
+    def backward(ctx, dO):
+        L, Q, K, V, O = ctx.saved_tensors
+        dQ, dK, dV = _flash_backward_compiled(Q, K, V, O, dO, L)
+        return dQ, dK, dV, None, None, None
 
 
