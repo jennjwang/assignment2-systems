@@ -1,0 +1,11 @@
+batch_size: 4
+context_length: 512
+vocab_size: 10000
+d_model: 1024
+num_layers: 24
+num_heads: 16
+d_ff: 4096
+rope_theta: 10000.0
+warmup_steps: 5
+measurement_steps: 10
+mode: full_training

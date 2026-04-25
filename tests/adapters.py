@@ -14,7 +14,8 @@ def get_flashattention_autograd_function_pytorch() -> type:
         A class object (not an instance of the class)
     """
     # For example: return MyFlashAttnAutogradFunctionClass
-    raise NotImplementedError
+    from cs336_systems.flash_forward import FlashAttention2Function
+    return FlashAttention2Function
 
 
 def get_flashattention_autograd_function_triton() -> type:

@@ -9,6 +9,7 @@ import warnings
 import einx
 import torch
 import torch.nn as nn
+import torch.cuda.nvtx as nvtx
 from einops import einsum, rearrange
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
@@ -248,9 +249,10 @@ class BasicsTransformerLM(nn.Module):
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             # (batch size, sequence_length, d_model)
-            x = layer(x)
+            with nvtx.range(f"TransformerBlock_{i}"):
+                x = layer(x)
         # (batch size, sequence_length, d_model)
         x = self.ln_final(x)
         # (batch size, sequence_length, vocab_size)
@@ -379,12 +381,20 @@ class TransformerBlock(nn.Module):
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
         # Apply the multi-head self-attention sublayer
-        x_attn = self.attn(self.ln1(x))
-        attn_sublayer_output = x + x_attn
+        with nvtx.range("tb_ln1"):
+            ln1_out = self.ln1(x)
+        with nvtx.range("tb_attn"):
+            x_attn = self.attn(ln1_out)
+        with nvtx.range("tb_attn_residual"):
+            attn_sublayer_output = x + x_attn
 
         # Apply the feed-forward sublayer
-        x_ffn = self.ffn(self.ln2(attn_sublayer_output))
-        ffn_sublayer_output = attn_sublayer_output + x_ffn
+        with nvtx.range("tb_ln2"):
+            ln2_out = self.ln2(attn_sublayer_output)
+        with nvtx.range("tb_ffn"):
+            x_ffn = self.ffn(ln2_out)
+        with nvtx.range("tb_ffn_residual"):
+            ffn_sublayer_output = attn_sublayer_output + x_ffn
         return ffn_sublayer_output
 
 
@@ -396,7 +406,14 @@ class SwiGLU(nn.Module):
         self.w3 = Linear(d_model, d_ff)
 
     def forward(self, x):
-        return self.w2(silu(self.w1(x)) * self.w3(x))
+        with nvtx.range("swiglu_w1"):
+            gate = self.w1(x)
+        with nvtx.range("swiglu_w3"):
+            val = self.w3(x)
+        with nvtx.range("swiglu_silu_mul"):
+            hidden = silu(gate) * val
+        with nvtx.range("swiglu_w2"):
+            return self.w2(hidden)
 
 
 def scaled_dot_product_attention(
@@ -424,14 +441,17 @@ def scaled_dot_product_attention(
     """
 
     d_k = K.shape[-1]
-    attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+    with nvtx.range("attn_qk_matmul"):
+        attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
 
     if mask is not None:
         attention_scores = torch.where(mask, attention_scores, float("-inf"))
 
-    attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
+    with nvtx.range("attn_softmax"):
+        attention_weights = softmax(attention_scores, dim=-1)
 
-    return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
+    with nvtx.range("attn_av_matmul"):
+        return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
 
 
 class CausalMultiHeadSelfAttention(nn.Module):
@@ -491,9 +511,10 @@ class CausalMultiHeadSelfAttention(nn.Module):
         *batch_dims, sequence_length, d_model = x.size()
         assert d_model == self.d_model
 
-        Q = self.q_proj(x)
-        K = self.k_proj(x)
-        V = self.v_proj(x)
+        with nvtx.range("attn_qkv_proj"):
+            Q = self.q_proj(x)
+            K = self.k_proj(x)
+            V = self.v_proj(x)
 
         # Take apart each head from the embedding dimension of Q, K, V to shape (..., num_heads, seq_len, d_k).
         Q, K, V = (
@@ -523,8 +544,8 @@ class CausalMultiHeadSelfAttention(nn.Module):
         # (..., sequence_length, num_heads * d_v).
         attn_output = rearrange(attn_output, "batch heads seq d_v -> batch seq (heads d_v)").contiguous()
 
-        # Apply the output projection
-        output = self.output_proj(attn_output)
+        with nvtx.range("attn_out_proj"):
+            output = self.output_proj(attn_output)
         return output
 
 
