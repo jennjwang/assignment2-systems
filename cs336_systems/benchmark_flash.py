@@ -42,7 +42,6 @@ import torch
 import timeit
 import numpy as np
 import modal
-import pandas as pd
 
 app = modal.App("systems-jwang400")
 
@@ -131,6 +130,7 @@ def benchmark_flash(d_model, seq, batch_size, dtype_str, device):
 
 @app.local_entrypoint()
 def main():
+    import pandas as pd
     d_models = [16, 32, 64, 128]
     seqs = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
     dtypes = ["bfloat16", "float32"]
