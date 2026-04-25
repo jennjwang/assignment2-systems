@@ -32,6 +32,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
     ):
 
     # Program indices
@@ -103,6 +104,11 @@ def flash_fwd_kernel(
         V = tl.load(V_block_ptr)
 
         S = tl.dot(Q, tl.trans(K)) * scale
+        if is_causal:
+            Q_tile_index = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            K_tile_index = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            mask = Q_tile_index[:, None] >= K_tile_index[None, :]
+            S = tl.where(mask, S, S + -1e6)
 
         m_ij = tl.max(S, axis=-1)
         m_i_new = tl.maximum(m_i, m_ij)
@@ -155,9 +161,11 @@ class TritonFlashAttentionAutograd(Function):
                             N_q, N_k,
                             1 / (d ** 0.5),
                             d,
-                            B_q, B_k)
+                            B_q, B_k,
+                            is_causal)
 
+        ctx.is_causal = is_causal
         ctx.save_for_backward(L, Q, K, V, O)
         return O
-        
+
 

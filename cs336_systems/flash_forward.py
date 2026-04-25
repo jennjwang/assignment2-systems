@@ -25,6 +25,21 @@ import torch
 from torch.autograd import Function
 from einops import einsum 
 
+def flash_backward(Q, K, V, O, dO, L):
+    d = Q.shape[-1]
+    D = (dO * O).sum(dim=-1)
+    S = einsum(Q, K, "batch B_q d, batch B_k d -> batch B_q B_k") / (d ** 0.5)
+    P = torch.exp(S - L.unsqueeze(-1))
+    dV = einsum(P, dO, "batch B_q B_k, batch B_q d -> batch B_k d")
+    dP = einsum(dO, V, "batch B_q d, batch B_k d -> batch B_q B_k")
+    dS = P * (dP - D.unsqueeze(-1))
+    dQ = einsum(dS, K, "batch B_q B_k, batch B_k d -> batch B_q d") / (d ** 0.5)
+    dK = einsum(dS, Q, "batch B_q B_k, batch B_q d -> batch B_k d") / (d ** 0.5)
+
+    return dQ, dK, dV
+
+_flash_backward_compiled = torch.compile(flash_backward)
+
 class FlashAttention2Function(Function):
     
     @staticmethod
@@ -76,4 +91,15 @@ class FlashAttention2Function(Function):
 
     @staticmethod
     def backward(ctx, dO):
-        raise NotImplementedError
+        '''
+        Problem (flash_backward): FlashAttention-2 Backward Pass (5 points)
+        Implement the backward pass for your FlashAttention-2 autograd.Function using PyTorch (not
+        Triton) and torch.compile. Your implementation should take the 𝑸, 𝑲, 𝑽 , 𝑶, 𝒅𝑶, and 𝐿 tensors
+        as inputs, and return 𝒅𝑸, 𝒅𝑲 and 𝒅𝑽 . Remember to compute and use the 𝐷 vector. You may
+        follow along the computations of Equation 13 to Equation 19.
+        '''
+
+        L, Q, K, V, O = ctx.saved_tensors
+        return _flash_backward_compiled(Q, K, V, O, dO, L)
+        
+
