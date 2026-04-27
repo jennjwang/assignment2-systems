@@ -222,3 +222,49 @@ torch_compile
 The memory is roughly the same between the compiled and uncompiled versions. The compute time is faster for the compiled version during a forward pass than the uncompiled version.
 
 b
+data_size num_gpu mean_time std_time
+0 262144 2 0.000028 0.000005
+1 262144 4 0.000040 0.000006
+2 262144 6 0.000057 0.000172
+3 2621440 2 0.000092 0.000295
+4 2621440 4 0.000106 0.000177
+5 2621440 6 0.000097 0.000032
+6 26214400 2 0.000240 0.000042
+7 26214400 4 0.000347 0.000293
+8 26214400 6 0.000332 0.000173
+9 268435456 2 0.001923 0.000260
+10 268435456 4 0.002564 0.000017
+11 268435456 6 0.002732 0.000016
+
+The time doesn't scale linearly with data size. As data size increases, latency increases but by a smaller factor. This seems to suggest that a fixed latency overhead dominates at the smaller sizes, but bandwidth dominates at larger sizes. The increase in GPU numbers also doesn't always lead to a faster communication, since there's also a growing communication cost.
+
+naive_ddp_benchmarking
+
+num_gpu mean_training_time std_training_time mean_communication_time std_communication_time communication_pct
+0 2 1.844413 0.002226 0.039807 0.003796 2.158235
+
+I ran 5 warmup steps with 10 measurement steps, and each rank had a batch size of 4. After each backward pass, I synchronized the gradients by all-reducing each model parameter. I averaged the timings across both ranks with an all-gather.
+
+minimal_ddp_flat_benchmarking
+
+world_size mean_training_time std_training_time mean_communication_time std_communication_time communication_pct
+0 2 1.85573 0.001566 0.037168 0.001187 2.002902
+There doesn't seem much difference other than in the standard deviation.
+
+optimizer_state_sharding_accounting
+
+a
+With sharding:
+[Rank 0] After model init: total=13125.0 MB params=12995.9 MB grads=0.0 MB opt_states=0.0 MB
+[Rank 0] Before optimizer step: total=39484.7 MB params=12995.9 MB grads=12995.9 MB opt_states=13191.2 MB
+[Rank 0] After optimizer step: total=39484.7 MB params=12995.9 MB grads=12995.9 MB opt_states=13191.2 MB
+
+Without sharding:
+[Rank 0] After model init: total=13125.0 MB params=12995.9 MB grads=0.0 MB opt_states=0.0 MB
+[Rank 0] Before optimizer step: total=52285.4 MB params=12995.9 MB grads=12995.9 MB opt_states=25991.9 MB
+[Rank 0] After optimizer step: total=52285.4 MB params=12995.9 MB grads=12995.9 MB opt_states=25991.9 MB
+
+b
+use_sharding num_gpu mean_training_time std_training_time mean_communication_time std_communication_time communication_pct
+0 True 2 1.842472 0.001536 0.036310 0.000603 1.97070
+1 False 2 1.854803 0.000878 0.036118 0.000444 1.94728

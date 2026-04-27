@@ -1,0 +1,2 @@
+world_size,mean_training_time,std_training_time,mean_communication_time,std_communication_time,communication_pct
+2,1.855730414442951,0.0015655740485836125,0.03716846150928177,0.0011872467777230505,2.0029019958935637
