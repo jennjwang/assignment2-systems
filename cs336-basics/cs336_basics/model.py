@@ -5,18 +5,35 @@ import logging
 import math
 import os
 import warnings
+from contextlib import contextmanager
 
 import einx
 import torch
 import torch.nn as nn
-import torch.cuda.nvtx as nvtx
 from einops import einsum, rearrange
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from cs336_basics.nn_utils import softmax
 
 logger = logging.getLogger(__name__)
+_current_layer_range = None
+
+
+@contextmanager
+def _active_layer_range(start: int, end: int):
+    global _current_layer_range
+    previous = _current_layer_range
+    _current_layer_range = (start, end)
+    try:
+        yield
+    finally:
+        _current_layer_range = previous
+
+
+def get_active_layer_range():
+    return _current_layer_range
 
 
 class Linear(nn.Module):
@@ -29,7 +46,6 @@ class Linear(nn.Module):
             d_out: int
                 The number of output features.
         """
-
         super().__init__()
         std = math.sqrt(2 / (d_in + d_out))
         self.weight: Float[Tensor, " d_out d_in"] = nn.Parameter(
@@ -40,7 +56,20 @@ class Linear(nn.Module):
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
     def extra_repr(self):
+        if self.weight.dim() < 2:
+            return f"(sharded shard_numel={self.weight.numel()})"
         return f"d_out={self.weight.shape[0]}, d_in={self.weight.shape[1]}"
+
+
+class LMHead(Linear):
+    def forward(self, x, targets=None):
+        if x.dtype != self.weight.dtype:
+            x = x.to(self.weight.dtype)
+        if targets is not None:
+            from cs336_systems.fused_linear_ce import fused_linear_cross_entropy
+
+            return fused_linear_cross_entropy(x, self.weight, targets)
+        return super().forward(x)
 
 
 class Embedding(nn.Module):
@@ -145,6 +174,9 @@ class RotaryEmbedding(nn.Module):
             cos, sin = self._freq_cis_cache[:, :seq_len, :].unbind(0)
 
         # 2D rotation matrix applied to pairs in x
+        cos = cos.to(x1.dtype)
+        sin = sin.to(x1.dtype)
+
         x1_rot = cos * x1 - sin * x2
         x2_rot = sin * x1 + cos * x2
         # result = einx.id("... x_half, ... x_half -> ... (x_half (1 + 1))", x1_rot, x2_rot).contiguous()
@@ -187,6 +219,14 @@ class BasicsTransformerLM(nn.Module):
         num_heads: int,
         d_ff: int,
         rope_theta: float | None = 10_000.0,
+        flash_attention_B_q: int = 128,
+        flash_attention_B_k: int = 128,
+        flash_attention_dq_B_q: int = 128,
+        flash_attention_dq_B_k: int = 128,
+        flash_attention_dkdv_B_q: int = 64,
+        flash_attention_dkdv_B_k: int = 128,
+        gradient_checkpointing: bool = False,
+        checkpoint_group_size: int = 4,
     ):
         # Store the model configuration for serialization / deserialization
         self.config = {
@@ -201,6 +241,9 @@ class BasicsTransformerLM(nn.Module):
             RotaryEmbedding(context_length, d_head, rope_theta) if rope_theta is not None else None
         )
 
+        self.gradient_checkpointing = gradient_checkpointing
+        self.checkpoint_group_size = checkpoint_group_size
+
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
@@ -208,56 +251,80 @@ class BasicsTransformerLM(nn.Module):
                     num_heads=num_heads,
                     d_ff=d_ff,
                     positional_encoder=self.positional_encoder,
+                    flash_attention_B_q=flash_attention_B_q,
+                    flash_attention_B_k=flash_attention_B_k,
+                    flash_attention_dq_B_q=flash_attention_dq_B_q,
+                    flash_attention_dq_B_k=flash_attention_dq_B_k,
+                    flash_attention_dkdv_B_q=flash_attention_dkdv_B_q,
+                    flash_attention_dkdv_B_k=flash_attention_dkdv_B_k,
                 )
                 for _ in range(num_layers)
             ]
         )
         self.ln_final = RMSNorm(d_model)
-        self.lm_head = Linear(d_model, vocab_size)
-        # Tie the weights, since the paper mentions that "we share the same weight
-        # matrix between the two embedding layers and the pre-softmax linear transformation"
+        self.lm_head = LMHead(d_model, vocab_size)
+
+        self._mark_transformer_layer_indices()
+
+        # Tie the weights
         # self.lm_head.weight = self.token_embeddings.weight
-        # report number of parameters
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.2f}M")
 
     def get_num_params(self) -> int:
         """
         Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
         """
-        n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        return sum(p.numel() for p in self.parameters())
 
-    def forward(self, x: Int[Tensor, " ... sequence_length"]) -> Float[Tensor, " ... sequence_length vocab_size"]:
-        """
-        Args:
-            x: Input IDs for language modeling.
+    def _mark_transformer_layer_indices(self) -> None:
+        self.token_embeddings.transformer_layer_idx = -1
+        self.lm_head.transformer_layer_idx = len(self.layers)
+        for layer_idx, layer in enumerate(self.layers):
+            for module in layer.modules():
+                module.transformer_layer_idx = layer_idx
 
-        Returns: A FloatTensor of shape
-            (batch size, sequence_length, vocab_size) with the predicted unnormalized next-word
-            distribution for each token.
-        """
-        _, sequence_length = x.size()
-        # (batch size, sequence_length, d_model)
-        # NOTE: paper mentions "In the embedding layers, we multiply those
-        # weights by sqrt(d_model)", but we aren't doing that here.
-        embedded_tokens = self.token_embeddings(x)
+    def _run_layers(self, hidden_states: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        with _active_layer_range(start, end):
+            for layer_idx in range(start, end):
+                hidden_states = self.layers[layer_idx](hidden_states)
+        return hidden_states
 
-        # (batch size, sequence_length, d_model)
-        # x = self.positional_encoder(embedded_tokens, positions)
-        x = embedded_tokens
+    @staticmethod
+    def _checkpoint(function, hidden_states: torch.Tensor) -> torch.Tensor:
+        return checkpoint(function, hidden_states, use_reentrant=False, preserve_rng_state=False)
 
-        for i, layer in enumerate(self.layers):
-            # (batch size, sequence_length, d_model)
-            with nvtx.range(f"TransformerBlock_{i}"):
-                x = layer(x)
-        # (batch size, sequence_length, d_model)
-        x = self.ln_final(x)
-        # (batch size, sequence_length, vocab_size)
-        logits = self.lm_head(x)
-        return logits
+    def _checkpoint_layer_group(self, hidden_states: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        def run_group(hidden_states: torch.Tensor) -> torch.Tensor:
+            return self._run_layers(hidden_states, start, end)
+
+        return self._checkpoint(run_group, hidden_states)
+
+    def _run_checkpointed_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Group mode checkpoints chunks of layers as a unit.
+        group_size = self.checkpoint_group_size
+        for start in range(0, len(self.layers), group_size):
+            end = min(start + group_size, len(self.layers))
+            hidden_states = self._checkpoint_layer_group(hidden_states, start, end)
+        return hidden_states
+
+    def _forward_to_hidden(self, x):
+        hidden_states = self.token_embeddings(x)
+
+        if self.gradient_checkpointing:
+            hidden_states = self._run_checkpointed_layers(hidden_states)
+        else:
+            hidden_states = self._run_layers(hidden_states, 0, len(self.layers))
+        return self.ln_final(hidden_states)
+
+    def forward(self, x, targets=None):
+        h = self._forward_to_hidden(x)
+        if targets is not None:
+            # Route through LMHead so the fused linear + CE path can avoid
+            # materializing the full [batch, sequence, vocab] logits tensor.
+            h = rearrange(h, "... d -> (...) d")
+            targets = rearrange(targets, "... -> (...)")
+            return self.lm_head(h, targets)
+        return self.lm_head(h)
 
     @torch.no_grad()
     def generate(
@@ -305,7 +372,8 @@ class BasicsTransformerLM(nn.Module):
                 # Get the score of the kth item that we kept---items with lower scores should be masked.
                 threshold = topk_values[:, -1]
                 topk_mask = temperature_scaled_next_token_logits < threshold
-                temperature_scaled_next_token_logits.masked_fill(topk_mask, float("-inf"))
+                temperature_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
+
             next_token_probabilities = softmax(temperature_scaled_next_token_logits, dim=-1)
             next_token_id = torch.multinomial(next_token_probabilities, 1)
             # End generation if we see the EOS token ID
@@ -358,12 +426,24 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         d_ff: int,
         positional_encoder: RotaryEmbedding | None,
+        flash_attention_B_q: int = 128,
+        flash_attention_B_k: int = 128,
+        flash_attention_dq_B_q: int = 128,
+        flash_attention_dq_B_k: int = 128,
+        flash_attention_dkdv_B_q: int = 64,
+        flash_attention_dkdv_B_k: int = 128,
     ):
         super().__init__()
         self.attn = CausalMultiHeadSelfAttention(
             d_model=d_model,
             num_heads=num_heads,
             positional_encoder=positional_encoder,
+            flash_attention_B_q=flash_attention_B_q,
+            flash_attention_B_k=flash_attention_B_k,
+            flash_attention_dq_B_q=flash_attention_dq_B_q,
+            flash_attention_dq_B_k=flash_attention_dq_B_k,
+            flash_attention_dkdv_B_q=flash_attention_dkdv_B_q,
+            flash_attention_dkdv_B_k=flash_attention_dkdv_B_k,
         )
         self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
         self.ln1 = RMSNorm(d_model)
@@ -380,21 +460,15 @@ class TransformerBlock(nn.Module):
         """
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
-        # Apply the multi-head self-attention sublayer
-        with nvtx.range("tb_ln1"):
-            ln1_out = self.ln1(x)
-        with nvtx.range("tb_attn"):
-            x_attn = self.attn(ln1_out)
-        with nvtx.range("tb_attn_residual"):
-            attn_sublayer_output = x + x_attn
+        # Apply the multi-head self-attention sublayer.
+        ln1_out = self.ln1(x)
+        x_attn = self.attn(ln1_out)
+        attn_sublayer_output = x + x_attn
 
-        # Apply the feed-forward sublayer
-        with nvtx.range("tb_ln2"):
-            ln2_out = self.ln2(attn_sublayer_output)
-        with nvtx.range("tb_ffn"):
-            x_ffn = self.ffn(ln2_out)
-        with nvtx.range("tb_ffn_residual"):
-            ffn_sublayer_output = attn_sublayer_output + x_ffn
+        # Apply the feed-forward sublayer.
+        ln2_out = self.ln2(attn_sublayer_output)
+        x_ffn = self.ffn(ln2_out)
+        ffn_sublayer_output = attn_sublayer_output + x_ffn
         return ffn_sublayer_output
 
 
@@ -406,14 +480,10 @@ class SwiGLU(nn.Module):
         self.w3 = Linear(d_model, d_ff)
 
     def forward(self, x):
-        with nvtx.range("swiglu_w1"):
-            gate = self.w1(x)
-        with nvtx.range("swiglu_w3"):
-            val = self.w3(x)
-        with nvtx.range("swiglu_silu_mul"):
-            hidden = silu(gate) * val
-        with nvtx.range("swiglu_w2"):
-            return self.w2(hidden)
+        gate = self.w1(x)
+        val = self.w3(x)
+        hidden = silu(gate) * val
+        return self.w2(hidden)
 
 
 def scaled_dot_product_attention(
@@ -439,19 +509,15 @@ def scaled_dot_product_attention(
         with the output of running your scaled dot product attention
         implementation with the provided key, query, and value tensors.
     """
-
     d_k = K.shape[-1]
-    with nvtx.range("attn_qk_matmul"):
-        attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+    attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
 
     if mask is not None:
         attention_scores = torch.where(mask, attention_scores, float("-inf"))
 
-    with nvtx.range("attn_softmax"):
-        attention_weights = softmax(attention_scores, dim=-1)
+    attention_weights = softmax(attention_scores, dim=-1)
 
-    with nvtx.range("attn_av_matmul"):
-        return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
+    return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
 
 
 class CausalMultiHeadSelfAttention(nn.Module):
@@ -478,6 +544,12 @@ class CausalMultiHeadSelfAttention(nn.Module):
         d_model: int,
         num_heads: int,
         positional_encoder: RotaryEmbedding | None = None,
+        flash_attention_B_q: int = 128,
+        flash_attention_B_k: int = 128,
+        flash_attention_dq_B_q: int = 128,
+        flash_attention_dq_B_k: int = 128,
+        flash_attention_dkdv_B_q: int = 64,
+        flash_attention_dkdv_B_k: int = 128,
     ):
         super().__init__()
         if positional_encoder is None:
@@ -511,10 +583,9 @@ class CausalMultiHeadSelfAttention(nn.Module):
         *batch_dims, sequence_length, d_model = x.size()
         assert d_model == self.d_model
 
-        with nvtx.range("attn_qkv_proj"):
-            Q = self.q_proj(x)
-            K = self.k_proj(x)
-            V = self.v_proj(x)
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
 
         # Take apart each head from the embedding dimension of Q, K, V to shape (..., num_heads, seq_len, d_k).
         Q, K, V = (
@@ -530,23 +601,27 @@ class CausalMultiHeadSelfAttention(nn.Module):
             Q = self.positional_encoder(Q, token_positions)
             K = self.positional_encoder(K, token_positions)
 
-        # Construct causal mask
-        iota = torch.arange(sequence_length, device=x.device)
-        qi = rearrange(iota, "query -> query 1")
-        kj = rearrange(iota, "key   -> 1   key")
-        causal_mask = qi >= kj  # (query, key)
-        causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
+        from cs336_systems.triton_ff import TritonFlashAttentionAutograd
 
-        # Shape: (..., num_heads, sequence_length, d_k)
-        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        # Q/K/V shape is (..., heads, seq, d). Flatten every leading
+        # batch/head dimension into the batch axis expected by the Triton
+        # kernels, then restore the original leading dims afterward.
+        leading_dims = Q.shape[:-2]
+        Q_flat = Q.reshape(-1, sequence_length, self.d_k)
+        K_flat = K.reshape(-1, sequence_length, self.d_k)
+        V_flat = V.reshape(-1, sequence_length, self.d_k)
+        attn_output = TritonFlashAttentionAutograd.apply(
+            Q_flat,
+            K_flat,
+            V_flat,
+            True,  # is_causal
+        )
+        attn_output = attn_output.reshape(*leading_dims, sequence_length, self.d_k)
 
         # Concatenate the attention output from all heads.
         # (..., sequence_length, num_heads * d_v).
-        attn_output = rearrange(attn_output, "batch heads seq d_v -> batch seq (heads d_v)").contiguous()
-
-        with nvtx.range("attn_out_proj"):
-            output = self.output_proj(attn_output)
-        return output
+        attn_output = rearrange(attn_output, "... heads seq d_v -> ... seq (heads d_v)").contiguous()
+        return self.output_proj(attn_output)
 
 
 def silu(x: torch.Tensor):
