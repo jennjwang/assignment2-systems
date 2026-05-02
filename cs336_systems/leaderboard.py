@@ -93,7 +93,7 @@ def run_leaderboard(rank, num_gpu, results, profile_mode=False, warmup_steps=1, 
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     import cs336_basics.model as basics_model
     from torch.optim import AdamW
-    from cs336_systems.fused_linear_ce import DEFAULT_CHUNK_SIZE as fused_ce_chunk_size
+    from cs336_systems.fused_linear_ce import default_chunk_size as fused_ce_chunk_size
     from cs336_systems.triton_ff import flash_bwd_dkdv_kernel, flash_bwd_dq_kernel, flash_fwd_kernel
     import triton
 
