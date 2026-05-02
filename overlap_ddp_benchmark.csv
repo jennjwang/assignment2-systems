@@ -1,0 +1,2 @@
+num_gpu,mean_training_time,std_training_time,mean_communication_time,std_communication_time,communication_pct
+2,1.7738877678013523,0.0021518414824858605,0.005844089400488884,0.00010296469378654469,0.3294509103996105

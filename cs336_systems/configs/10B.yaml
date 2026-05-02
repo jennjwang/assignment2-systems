@@ -6,6 +6,6 @@ num_layers: 50
 num_heads: 36
 d_ff: 12288
 rope_theta: 10000.0
-warmup_steps: 5
+warmup_steps: 0
 measurement_steps: 10
 mode: full_training

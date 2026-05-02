@@ -39,6 +39,8 @@ from contextlib import nullcontext
 from pathlib import Path
 import json
 
+import modal
+
 
 @nvtx.range("profile_benchmark")
 def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layers, num_heads, d_ff, rope_theta, warmup_steps, measurement_steps, mode, mixed_precision=False, use_compile=True):
@@ -73,7 +75,7 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
                 model(data)
             torch.cuda.synchronize()
 
-        torch.cuda.memory._record_memory_history(max_entries=1000000)
+        # torch.cuda.memory._record_memory_history(max_entries=1000000)
 
         with nvtx.range("forward_only"):
             for i in range(measurement_steps):
@@ -87,8 +89,8 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
             std_time = float(np.std(times))
             print(f"Forward pass time: {mean_time} seconds ± {std_time} seconds")
 
-        torch.cuda.memory._dump_snapshot(f"/traces/memory_snapshot_{mode}_ctx{context_length}{'_mp' if mixed_precision else ''}.pickle")
-        torch.cuda.memory._record_memory_history(enabled=None)
+        # torch.cuda.memory._dump_snapshot(f"/traces/memory_snapshot_{mode}_ctx{context_length}{'_mp' if mixed_precision else ''}.pickle")
+        # torch.cuda.memory._record_memory_history(enabled=None)
 
     elif mode == "forward_backward":
 
@@ -103,7 +105,8 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
             torch.cuda.synchronize()
 
         with nvtx.range("forward_backward"):
-            with torch.autograd.profiler.emit_nvtx():
+            # with torch.autograd.profiler.emit_nvtx():
+            with nullcontext():
                 for _ in range(measurement_steps):
                     start_time = timeit.default_timer()
                     with nvtx.range("forward"):
@@ -135,10 +138,11 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
             optimizer.step()
             torch.cuda.synchronize()
 
-        torch.cuda.memory._record_memory_history(max_entries=1000000)
+        # torch.cuda.memory._record_memory_history(max_entries=1000000)
 
         with nvtx.range("full_training"):
-            with torch.autograd.profiler.emit_nvtx():
+            # with torch.autograd.profiler.emit_nvtx():
+            with nullcontext():
                 for _ in range(measurement_steps):
                     start_time = timeit.default_timer()
                     with nvtx.range("forward"):
@@ -161,10 +165,10 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
                 print(f"Full training time: {mean_time} seconds ± {std_time} seconds")
     
         # Save a pickle file to be loaded by PyTorch's online tool.
-        torch.cuda.memory._dump_snapshot(f"/traces/memory_snapshot_{mode}_ctx{context_length}{'_mp' if mixed_precision else ''}.pickle")
+        # torch.cuda.memory._dump_snapshot(f"/traces/memory_snapshot_{mode}_ctx{context_length}{'_mp' if mixed_precision else ''}.pickle")
 
         # Stop recording history.
-        torch.cuda.memory._record_memory_history(enabled=None)
+        # torch.cuda.memory._record_memory_history(enabled=None)
 
     return {
         "mode": mode,
@@ -185,8 +189,6 @@ def benchmark(batch_size, context_length, vocab_size, device, d_model, num_layer
         "std_seconds": float(std_time),
         "times_seconds": [float(t) for t in times],
     }
-
-import modal
 
 app = modal.App("systems-jwang400")
 
@@ -222,70 +224,70 @@ image = (
 def profile_one(
     config_path: str,
     mixed_precision: bool = False,
-    overrides: dict = {},
-    save_json_dir: str | None = "/data/benchmark_results",
+    overrides: dict | None = None,
+    save_json_dir: str | None = None,
     use_compile: bool = True,
 ):
-    import subprocess
-    import sys
-    import tempfile
     from pathlib import Path
 
     import yaml
     name = Path(config_path).stem
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
-    cfg.update(overrides)
-
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-    yaml.dump(cfg, tmp)
-    tmp.close()
+    cfg.update(overrides or {})
 
     ctx = cfg.get("context_length", "unknown")
     mode = cfg.get("mode", "full_training")
     mp_suffix = "_mp" if mixed_precision else ""
-    trace_path = f"/traces/{name}_ctx{ctx}_{mode}{mp_suffix}"
     compile_suffix = "compiled" if use_compile else "uncompiled"
     result_json_path = None
     if save_json_dir is not None:
         result_json_path = f"{save_json_dir}/{name}_ctx{ctx}_{mode}{mp_suffix}_{compile_suffix}.json"
-    sys.path.insert(0, "/root/project")
-    import os
-    env = os.environ.copy()
-    env["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
-    env["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-    mp_args = ["--mixed_precision"] if mixed_precision else []
-    benchmark_cmd = [
-        sys.executable, "-m", "cs336_systems.benchmark",
-        "--configs", tmp.name,
-        *mp_args,
-    ]
-    if not use_compile:
-        benchmark_cmd.append("--no_compile")
-    if result_json_path is not None:
-        benchmark_cmd.extend(["--save_json", result_json_path])
 
-    subprocess.run(
-        [
-            "nsys", "profile",
-            "--trace=cuda,cudnn,cublas,nvtx",
-            "--cuda-memory-usage=true",
-            "--gpu-metrics-devices=0",
-            "--force-overwrite=true",
-            "-o", trace_path,
-            *benchmark_cmd,
-        ],
-        env=env,
-        check=False,
+    # os.environ["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
+    # os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+
+    # subprocess.run(
+    #     [
+    #         "nsys", "profile",
+    #         "--trace=cuda,cudnn,cublas,nvtx",
+    #         "--cuda-memory-usage=true",
+    #         "--gpu-metrics-devices=0",
+    #         "--force-overwrite=true",
+    #         "-o", f"/traces/{name}_ctx{ctx}_{mode}{mp_suffix}",
+    #         sys.executable, "-m", "cs336_systems.benchmark",
+    #         "--configs", tmp.name,
+    #     ],
+    #     env=env,
+    #     check=False,
+    # )
+    # subprocess.run(["nsys", "stats", f"{trace_path}.nsys-rep"], check=False)
+    # traces_vol.commit()
+    result = benchmark(
+        batch_size=cfg["batch_size"],
+        context_length=cfg["context_length"],
+        vocab_size=cfg["vocab_size"],
+        device=cfg.get("device", "cuda"),
+        d_model=cfg["d_model"],
+        num_layers=cfg["num_layers"],
+        num_heads=cfg["num_heads"],
+        d_ff=cfg["d_ff"],
+        rope_theta=cfg.get("rope_theta", 10000.0),
+        warmup_steps=cfg.get("warmup_steps", 5),
+        measurement_steps=cfg.get("measurement_steps", 10),
+        mode=mode,
+        mixed_precision=mixed_precision,
+        use_compile=use_compile,
     )
-    subprocess.run(["nsys", "stats", f"{trace_path}.nsys-rep"], check=False)
-    traces_vol.commit()
-    vol1.commit()
-    return {
-        "trace": f"{trace_path}.nsys-rep",
-        "results_json": result_json_path,
-        "compiled": use_compile,
-    }
+    result["model"] = name
+
+    if result_json_path is not None:
+        out_path = Path(result_json_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2))
+        vol1.commit()
+
+    return result
 
 # @app.function(
 #     image=image,
@@ -322,25 +324,68 @@ configs = [
     "/root/project/cs336_systems/configs/medium.yaml",
     "/root/project/cs336_systems/configs/large.yaml",
     "/root/project/cs336_systems/configs/xl.yaml",
+    "/root/project/cs336_systems/configs/10B.yaml",
 ]
 
 @app.local_entrypoint()
 def main(
     mixed_precision: bool = False,
-    save_json_dir: str = "/data/benchmark_results",
     use_compile: bool = True,
+    compare_compile: bool = False,
+    modes: str = "forward_only,forward_backward,full_training",
+    warmup_steps: int = 1,
+    measurement_steps: int = 10,
+    include_no_warmup: bool = False,
 ):
+    selected_modes = [mode.strip() for mode in modes.split(",") if mode.strip()]
+    warmup_values = [warmup_steps]
+    if include_no_warmup and 0 not in warmup_values:
+        warmup_values.append(0)
+    compile_values = [False, True] if compare_compile else [use_compile]
+
     spawns = [
-        profile_one.spawn(
+        (
             cfg,
-            mixed_precision=mixed_precision,
-            save_json_dir=save_json_dir,
-            use_compile=use_compile,
+            mode,
+            warmup,
+            compile_value,
+            profile_one.spawn(
+                cfg,
+                mixed_precision=mixed_precision,
+                overrides={
+                    "mode": mode,
+                    "warmup_steps": warmup,
+                    "measurement_steps": measurement_steps,
+                },
+                save_json_dir=None,
+                use_compile=compile_value,
+            ),
         )
+        for compile_value in compile_values
+        for warmup in warmup_values
+        for mode in selected_modes
         for cfg in configs
     ]
-    for cfg, spawn in zip(configs, spawns):
-        print(f"{cfg}: {spawn.get()}")
+    results = []
+    for cfg, mode, warmup, compile_value, spawn in spawns:
+        model = Path(cfg).stem
+        compile_label = "compiled" if compile_value else "uncompiled"
+        try:
+            result = spawn.get()
+            results.append(result)
+            mean = result["mean_seconds"]
+            std = result["std_seconds"]
+            print(f"{model:>6} | {compile_label:<10} | warmup={warmup:<2} | {mode:<16} | {mean:.6f} ± {std:.6f}s")
+        except Exception as exc:
+            message = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+            print(f"{model:>6} | {compile_label:<10} | warmup={warmup:<2} | {mode:<16} | ERROR: {message}")
+
+    if compare_compile and results:
+        import pandas as pd
+
+        df = pd.DataFrame(results)
+        df.to_csv("benchmark_transformer_compile.csv", index=False)
+        print(df)
 
 
 if __name__ == "__main__":

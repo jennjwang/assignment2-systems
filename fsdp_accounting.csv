@@ -1,0 +1,2 @@
+num_gpu,mean_training_time,std_training_time,mean_sync_stall_time,std_sync_stall_time,sync_stall_pct,communication_note
+2,1.7827807784546166,0.0011396528137569023,0.0019832375808618964,8.567707618567483e-05,0.11124405225980973,sync_stall excludes overlapped forward all-gathers; use the nsys trace for total NCCL time

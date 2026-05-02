@@ -30,6 +30,64 @@ xl
 - forward-backward: 2.671391514595598 seconds ± 0.00021758402306584234 seconds
 - full: OOM
 
+small | warmup=5 | forward_only | 0.022020 ± 0.000089s
+medium | warmup=5 | forward_only | 0.040123 ± 0.001777s
+large | warmup=5 | forward_only | 0.077066 ± 0.001625s
+xl | warmup=5 | forward_only | 0.096282 ± 0.000598s
+10B | warmup=5 | forward_only | 0.131281 ± 0.000400s
+
+small | warmup=5 | forward_backward | 0.020444 ± 0.000379s
+medium | warmup=5 | forward_backward | 0.088496 ± 0.000205s
+large | warmup=5 | forward_backward | 0.139656 ± 0.000117s
+xl | warmup=5 | forward_backward | 0.279138 ± 0.003807s
+10B | warmup=5 | forward_backward | 0.440958 ± 0.000657s
+
+small | warmup=5 | full_training | 0.031726 ± 0.000172s
+medium | warmup=5 | full_training | 0.069777 ± 0.000358s
+large | warmup=5 | full_training | 0.200450 ± 0.002770s
+xl | warmup=5 | full_training | 0.378437 ± 0.003942s
+10B | warmup=5 | full_training | OOM
+
+Do you see high variability across measurements, or is the standard deviation
+small?
+
+small | warmup=0 | forward_only | 0.319832 ± 0.888287s
+medium | warmup=0 | forward_only | 0.053793 ± 0.001310s
+large | warmup=0 | forward_only | 0.079182 ± 0.002711s
+xl | warmup=0 | full_training | 0.388038 ± 0.031478s
+10B | warmup=0 | forward_only | 0.127555 ± 0.000868s
+
+xl | warmup=0 | forward_only | 0.117916 ± 0.067011s
+small | warmup=0 | forward_backward | 0.100249 ± 0.169527s
+medium | warmup=0 | forward_backward | 0.091823 ± 0.002450s
+large | warmup=0 | forward_backward | 0.140018 ± 0.000334s
+10B | warmup=0 | forward_backward | 0.463773 ± 0.003124s
+
+xl | warmup=0 | forward_backward | 0.278588 ± 0.003924s
+small | warmup=0 | full_training | 0.032575 ± 0.000947s
+medium | warmup=0 | full_training | 0.071044 ± 0.001403s
+large | warmup=0 | full_training | 0.177662 ± 0.000878s
+xl | warmup=0 | full_training | 0.388038 ± 0.031478s
+10B | warmup=0 | full_training | OOM
+
+small | warmup=1 | forward_only | 0.014191 ± 0.000829s
+medium | warmup=1 | forward_only | 0.026984 ± 0.000310s
+large | warmup=1 | forward_only | 0.073931 ± 0.000047s
+xl | warmup=1 | forward_only | 0.124555 ± 0.000764s
+10B | warmup=1 | forward_only | 0.127923 ± 0.000812s
+
+small | warmup=1 | forward_backward | 0.025302 ± 0.010412s
+medium | warmup=1 | forward_backward | 0.052005 ± 0.007726s
+large | warmup=1 | forward_backward | 0.223890 ± 0.000136s
+xl | warmup=1 | forward_backward | 0.388895 ± 0.001756s
+10B | warmup=1 | forward_backward | 0.462944 ± 0.003494s
+
+small | warmup=1 | full_training | 0.031718 ± 0.000283s
+medium | warmup=1 | full_training | 0.071626 ± 0.000982s
+large | warmup=1 | full_training | 0.261393 ± 0.000525s
+xl | warmup=1 | full_training | 0.483429 ± 0.003285s
+10B | warmup=1 | full_training | OOM
+
 nsys_profile
 
 small - context length: 512
@@ -222,6 +280,16 @@ torch_compile
 The memory is roughly the same between the compiled and uncompiled versions. The compute time is faster for the compiled version during a forward pass than the uncompiled version.
 
 b
+small | compiled | warmup=5 | forward_only | 0.009691 ± 0.000026s
+medium | compiled | warmup=5 | forward_only | 0.021500 ± 0.000035s
+large | compiled | warmup=5 | forward_only | 0.040352 ± 0.000387s
+xl | compiled | warmup=5 | forward_only | 0.097591 ± 0.000897s
+10B | compiled | warmup=5 | forward_only | 0.112524 ± 0.001000s
+small | compiled | warmup=5 | forward_backward | 0.020360 ± 0.000115s
+medium | compiled | warmup=5 | forward_backward | 0.042435 ± 0.000039s
+large | compiled | warmup=5 | forward_backward | 0.135620 ± 0.000386s
+xl | compiled | warmup=5 | forward_backward | 0.273645 ± 0.001329s
+
 data_size num_gpu mean_time std_time
 0 262144 2 0.000028 0.000005
 1 262144 4 0.000040 0.000006
@@ -268,3 +336,5 @@ b
 use_sharding num_gpu mean_training_time std_training_time mean_communication_time std_communication_time communication_pct
 0 True 2 1.842472 0.001536 0.036310 0.000603 1.97070
 1 False 2 1.854803 0.000878 0.036118 0.000444 1.94728
+
+data_parallel_calcs

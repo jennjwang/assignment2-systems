@@ -173,7 +173,7 @@ def profile_ddp(trace_name: str = "ddp"):
     trace_path = f"/traces/{trace_name}"
     cmd = [
         "nsys", "profile",
-        "--trace=cuda,nvtx,cublas",
+        "--trace=cuda,nvtx,cublas,nccl",
         "--force-overwrite=true",
         "-o", trace_path,
         sys.executable, "-m",
@@ -184,16 +184,41 @@ def profile_ddp(trace_name: str = "ddp"):
     return f"{trace_path}.nsys-rep"
 
 
+@app.function(
+    image=image,
+    gpu="B200:2",
+    timeout=60 * 120,
+    volumes={"/data": vol1, "/traces": traces_vol},
+)
+def profile_ddp_overlap(trace_name: str = "ddp_overlap"):
+    import subprocess, sys
+    sys.path.insert(0, "/root/cs336-systems")
+    trace_path = f"/traces/{trace_name}"
+    cmd = [
+        "nsys", "profile",
+        "--trace=cuda,nvtx,cublas,nccl",
+        "--force-overwrite=true",
+        "-o", trace_path,
+        sys.executable, "-m",
+        "cs336_systems.distributed_data_parallel.overlap_ddp_benchmark",
+    ]
+    subprocess.run(cmd, check=False)
+    traces_vol.commit()
+    return f"{trace_path}.nsys-rep"
+
+
 @app.local_entrypoint()
 def main():
-    import pandas as pd
-    # Timing benchmark
+    import csv
     result = benchmark_distributed.remote(warmup_steps=5, measurement_steps=10)
-    df = pd.DataFrame([result])
-    df.to_csv("naive_ddp_benchmark.csv", index=False)
-    print(df)
-    # Run profile_ddp after swapping the implementation manually
+    with open("naive_ddp_benchmark.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=result.keys())
+        writer.writeheader()
+        writer.writerow(result)
+    for k, v in result.items():
+        print(f"{k}: {v}")
     print(profile_ddp.remote("ddp_naive"))
+    print(profile_ddp_overlap.remote("ddp_overlap"))
 
 
 if __name__ == "__main__":
