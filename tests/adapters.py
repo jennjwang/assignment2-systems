@@ -87,7 +87,7 @@ def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) 
         Instance of an FSDP class.
     """
     # For example: return FSDP(module, compute_dtype=compute_dtype)
-    from cs336_systems.fsdp.fsdp import FSDP
+    from cs336_systems.fsdp.old_fsdp import FSDP
     return FSDP(module, compute_dtype=compute_dtype)
 
 
