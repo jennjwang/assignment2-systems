@@ -39,7 +39,6 @@ cfg = Config()
 
 activation_checkpointing = True
 checkpoint_group_size = 6
-checkpoint_num_layers = None
 use_torch_compile = True
 compile_mode = "default"
 fsdp_prefetch_distance = 2
@@ -123,7 +122,6 @@ def run_leaderboard(rank, num_gpu, results, profile_mode=False, warmup_steps=1, 
         # flash_attention_dkdv_B_k=attn_dkdv_B_k,
         gradient_checkpointing=activation_checkpointing,
         checkpoint_group_size=checkpoint_group_size,
-        checkpoint_num_layers=checkpoint_num_layers,
     ).to(device=f"cuda:{rank}")
 
     if use_torch_compile:
@@ -159,7 +157,6 @@ def run_leaderboard(rank, num_gpu, results, profile_mode=False, warmup_steps=1, 
         results[0] = timing_results
         print(
             f"leaderboard: checkpoint_group_size={checkpoint_group_size}, "
-            f"checkpoint_num_layers={checkpoint_num_layers}, "
             f"activation_checkpointing={activation_checkpointing}, "
             f"fused_ce_chunk_size={fused_ce_chunk_size}, "
             f"compute_dtype={cfg.torch_dtype}, "
