@@ -38,7 +38,7 @@ def flash_backward(Q, K, V, O, dO, L):
 
     return dQ, dK, dV
 
-_flash_backward_compiled = torch.compile(flash_backward)
+_flash_backward_compiled = torch.compile(flash_backward, backend="eager")
 
 
 class FlashAttention2Function(Function):
